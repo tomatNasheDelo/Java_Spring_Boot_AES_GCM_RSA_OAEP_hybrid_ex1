@@ -1,0 +1,117 @@
+Spring Boot + Java: гибридное шифрование AES-GCM + RSA-OAEP
+===========================================================
+
+Зачем нужен этот проект
+-----------------------
+
+RSA не предназначен для шифрования больших сообщений напрямую. В гибридной схеме случайный AES-256 ключ шифрует данные через AES-GCM, а RSA-OAEP шифрует (оборачивает) только AES-ключ.
+
+Порядок шифрования:
+1. Сгенерировать новый случайный AES-256 ключ и 96-битный nonce.
+2. Зашифровать текст `AES/GCM/NoPadding`; version формата включена как AAD.
+3. Зашифровать AES-ключ RSA public key с OAEP SHA-256 и MGF1 SHA-256.
+4. Вернуть version, encryptedKey, nonce и ciphertext в Base64.
+
+Расшифрование выполняется обратно: RSA private key восстанавливает AES key; AES-GCM проверяет tag и расшифровывает сообщение. Если nonce, ciphertext или encrypted key подменены, расшифрование завершится ошибкой.
+
+Требования
+----------
+
+- JDK 17+
+- Gradle 8+
+- OpenSSL для примеров создания ключевой пары
+
+Генерация ключевой пары
+-----------------------
+
+В корне проекта сгенерируй RSA ключ не менее 2048 бит. Приватный ключ — PKCS#8 PEM, публичный — X.509 SubjectPublicKeyInfo PEM:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out private.pem
+openssl pkey -in private.pem -pubout -out public.pem
+```
+
+Передай ключи через окружение (не коммить PEM-файлы):
+
+```bash
+export RSA_PUBLIC_KEY_PEM="$(cat public.pem)"
+export RSA_PRIVATE_KEY_PEM="$(cat private.pem)"
+gradle bootRun
+```
+
+В PowerShell:
+
+```powershell
+$env:RSA_PUBLIC_KEY_PEM = Get-Content -Raw public.pem
+$env:RSA_PRIVATE_KEY_PEM = Get-Content -Raw private.pem
+gradle bootRun
+```
+
+При старте приложение проверит формат ключей, соответствие modulus и размер RSA (минимум 2048 бит). Переменные окружения подходят для учебного запуска; в production используй secret manager/HSM/KMS и не помещай приватный ключ в обычную конфигурацию приложения.
+
+REST API
+--------
+
+Шифрование:
+
+```bash
+curl -sS -X POST http://localhost:8080/api/crypto/encrypt \
+  -H 'Content-Type: application/json' \
+  -d '{"plaintext":"Привет, гибридная криптография"}'
+```
+
+Пример формы ответа (значения сокращены):
+
+```json
+{
+  "version": "v1",
+  "encryptedKey": "<base64 RSA-OAEP wrapped AES key>",
+  "nonce": "<base64 12-byte GCM nonce>",
+  "ciphertext": "<base64 ciphertext and GCM tag>"
+}
+```
+
+Расшифровка: передай в `POST /api/crypto/decrypt` все четыре поля из ответа шифрования. Например, сохрани JSON-ответ в `envelope.json`, затем используй его как тело запроса:
+
+```bash
+curl -sS -X POST http://localhost:8080/api/crypto/decrypt \
+  -H 'Content-Type: application/json' \
+  --data-binary @envelope.json
+```
+
+Лимит учебного API — 1,000,000 символов для входного текста. Для production нужны аутентификация и авторизация, TLS, ограничения запросов, мониторинг без логирования секретов и тщательно спроектированный формат envelope.
+
+Тесты
+-----
+
+```bash
+gradle test
+```
+
+- `HybridEncryptionServiceTest` — unit tests: round trip, случайные ключи/nonce, ошибка при изменённом ciphertext и неподдерживаемой версии.
+- `HybridCryptoApiIntegrationTest` — Spring Boot + MockMvc тестирует HTTP путь с временной тестовой RSA key pair.
+- Внешняя БД, Docker и Testcontainers не нужны.
+
+Что важно помнить
+-----------------
+
+- Новый AES-ключ генерируется на каждое сообщение; nonce уникален для этого ключа.
+- GCM одновременно шифрует и проверяет целостность/подлинность ciphertext, но не подтверждает личность отправителя. Для доказательства авторства нужна цифровая подпись.
+- OAEP параметры должны быть одинаковыми на шифровании и расшифровании; здесь явно выставлены SHA-256 и MGF1 с SHA-256.
+- RSA private key нельзя публиковать. Публичный ключ не является секретом, но нужно убедиться, что он действительно принадлежит получателю (иначе возможна подмена ключа).
+- RSA-OAEP не заменяет TLS и не решает задачу управления ключами.
+- В проекте оба endpoints находятся на одном backend и используются только для обучения. Для реального end-to-end шифрования ключи и private key должны находиться на стороне получателя, а сервер не должен получать plaintext/private key.
+- Не используй этот самодельный формат как production protocol без threat modeling, ротации ключей и криптографического review.
+
+Пауза для изучения
+------------------
+
+Попробуй ответить без подсказок:
+1. Почему RSA шифрует AES key, а не весь текст?
+2. Какие части envelope секретны, а какие нужны для расшифровки и могут передаваться открыто?
+3. Что проверяет GCM tag?
+4. Почему нельзя повторять GCM nonce с тем же ключом?
+5. Чем шифрование отличается от цифровой подписи?
+6. Что изменится, если у отправителя будет только public key, а private key останется у получателя?
+
+После изучения можно переходить к отдельному проекту цифровой подписи RSA-PSS или ECDSA.

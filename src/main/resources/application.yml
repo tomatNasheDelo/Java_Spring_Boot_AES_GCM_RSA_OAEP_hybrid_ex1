@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: java-spring-boot-aes-gcm-rsa-oaep-hybrid-ex1
+
+server:
+  port: ${SERVER_PORT:8080}
+
+app:
+  crypto:
+    # PEM-encoded public X.509 key and private PKCS#8 key are required.
+    public-key-pem: ${RSA_PUBLIC_KEY_PEM:}
+    private-key-pem: ${RSA_PRIVATE_KEY_PEM:}
